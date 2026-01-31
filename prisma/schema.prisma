@@ -1,0 +1,526 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  // URL is configured in prisma.config.ts
+}
+
+// ENUMS - Single Source of Truth
+enum UserRole {
+  USER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  APPROVED
+  REJECTED
+  PUBLISHED
+  EXPIRED
+}
+
+enum PlatformType {
+  TWITTER
+  FACEBOOK
+  TELEGRAM
+  WHATSAPP
+  TIKTOK
+}
+
+enum SubscriptionPlan {
+  FREE
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  TRIALING
+  INCOMPLETE
+}
+
+// MODELS
+
+// ========== AUTHENTICATION & USERS ==========
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String?
+  password        String?   // Hashed password for credentials provider
+  emailVerified   DateTime?
+  image           String?
+  role            UserRole  @default(USER)
+  
+  // Tenant identifier for multi-tenancy
+  tenantId        String    @unique @default(cuid())
+  companyName     String?
+  website         String?
+  
+  // Relationships
+  subscription    Subscription?
+  branding        Branding?
+  userPlatforms   UserPlatform[]
+  scrapeConfigs   UserScrapeConfig[]
+  jobs            Job[]
+  analytics       UserAnalytics[]
+  jobClicks       JobClick[]
+  postLogs        PostLog[]     // Added for PostLog relation
+  systemLogs      SystemLog[]   // Added for SystemLog relation
+  apiKeys         ApiKey[]      // Added for ApiKey relation
+  
+  // Timestamps
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // OAuth (NextAuth)
+  accounts        Account[]
+  sessions        Session[]
+  
+  @@index([email])
+  @@index([tenantId])
+  @@index([role])
+}
+
+// NextAuth models
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ========== SUBSCRIPTION & BILLING ==========
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String             @unique
+  user                 User               @relation(fields: [userId], references: [id])
+  
+  // Stripe
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  stripePriceId        String?
+  
+  // Subscription details
+  plan                 SubscriptionPlan   @default(FREE)
+  status               SubscriptionStatus @default(ACTIVE)
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  
+  // Limits based on plan
+  maxJobSources        Int                @default(3)    // Number of sources user can add
+  maxDailyPosts        Int                @default(10)   // Max posts per day
+  maxMonthlyScrapes    Int                @default(1000) // Max scrapes per month
+  hasAIFeatures        Boolean            @default(false)
+  hasBranding          Boolean            @default(false)
+  
+  // Timestamps
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  
+  @@index([userId])
+  @@index([status])
+  @@index([plan])
+}
+
+// ========== JOB SOURCES & SCRAPING ==========
+model JobSource {
+  id            String     @id @default(cuid())
+  name          String     // e.g., "Indeed", "LinkedIn Jobs"
+  baseUrl       String     // Base URL for the job board
+  isActive      Boolean    @default(true)
+  
+  // Scraping configuration (admin-managed)
+  scrapeConfig  ScrapeConfig? // One-to-one with scrape config
+  
+  // Relationships
+  jobs          Job[]
+  userConfigs   UserScrapeConfig[]
+  
+  // Timestamps
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  
+  @@unique([name, baseUrl])
+  @@index([isActive])
+}
+
+model ScrapeConfig {
+  id               String    @id @default(cuid())
+  jobSourceId      String    @unique
+  jobSource        JobSource @relation(fields: [jobSourceId], references: [id])
+  
+  // Selector configuration (JSON for flexibility)
+  jobListSelector  String    // CSS selector for job list container
+  jobItemSelector  String    // CSS selector for individual job items
+  titleSelector    String    // Selector for job title
+  companySelector  String?   // Selector for company name
+  locationSelector String?   // Selector for location
+  descriptionSelector String // Selector for job description
+  salarySelector   String?   // Selector for salary
+  linkSelector     String    // Selector for job link (relative/absolute)
+  
+  // Pagination
+  hasPagination    Boolean   @default(false)
+  nextPageSelector String?   // Selector for next page button
+  
+  // Rate limiting
+  crawlDelay       Int       @default(2000) // ms between requests
+  maxPages         Int       @default(5)    // Max pages to scrape
+  
+  // Robots.txt compliance
+  respectRobotsTxt Boolean   @default(true)
+  
+  // Timestamps
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  
+  @@index([jobSourceId])
+}
+
+// User-specific configuration for job sources
+model UserScrapeConfig {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  jobSourceId  String
+  jobSource    JobSource @relation(fields: [jobSourceId], references: [id])
+  
+  // User-specific settings
+  isEnabled    Boolean   @default(true)
+  scrapeFrequency String @default("DAILY") // DAILY, HOURLY, WEEKLY
+  categories   String[]  // Categories to filter (stored as JSON)
+  keywords     String[]  // Keywords to include/exclude
+  
+  // Timestamps
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  
+  @@unique([userId, jobSourceId])
+  @@index([userId])
+  @@index([jobSourceId])
+}
+
+// ========== JOBS ==========
+model Job {
+  id                     String    @id @default(cuid())
+  slug                   String    @unique // URL-friendly identifier
+  
+  // Original scraped data
+  originalTitle          String
+  originalDescription    String    @db.Text
+  originalCompany        String?
+  originalLocation       String?
+  originalSalary         String?
+  originalUrl            String    @unique // Original job posting URL
+  sourcePublishDate      DateTime? // When job was posted on source
+  
+  // Normalized/processed data
+  title                  String
+  description            String    @db.Text
+  company               String?
+  location              String?
+  salaryMin             Decimal?  @db.Decimal(10, 2)
+  salaryMax             Decimal?  @db.Decimal(10, 2)
+  salaryCurrency        String?   @default("USD")
+  employmentType        String?   // FULL_TIME, PART_TIME, CONTRACT, etc.
+  experienceLevel       String?   // ENTRY, MID, SENIOR, EXECUTIVE
+  
+  // AI Processing
+  rewrittenDescription  String?   @db.Text // AI-rewritten description
+  aiImageUrl           String?   // Generated AI image URL
+  brandedImageUrl      String?   // Image with branding
+  
+  // Job metadata
+  status                JobStatus @default(PENDING)
+  isRemote              Boolean   @default(false)
+  tags                  String[]  // Categorization tags
+  
+  // SEO & Display
+  metaTitle            String?
+  metaDescription      String?
+  
+  // Relationships
+  jobSourceId          String
+  jobSource            JobSource  @relation(fields: [jobSourceId], references: [id])
+  userId               String?    // Owner/tenant who scraped this
+  user                 User?      @relation(fields: [userId], references: [id])
+  postLogs             PostLog[]
+  clicks               JobClick[]
+  
+  // Timestamps
+  scrapedAt            DateTime   @default(now())
+  processedAt          DateTime?
+  publishedAt          DateTime?
+  expiresAt            DateTime?  // Job expiration
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+  
+  @@index([userId])
+  @@index([jobSourceId])
+  @@index([status])
+  @@index([slug])
+  @@index([createdAt])
+  @@index([title])
+  @@index([company])
+  @@index([location])
+}
+
+// ========== SOCIAL PLATFORMS ==========
+model Platform {
+  id            String      @id @default(cuid())
+  type          PlatformType @unique
+  name          String      // "Twitter/X", "Facebook", etc.
+  isActive      Boolean     @default(true)
+  baseApiUrl    String?     // API base URL
+  
+  // Relationships
+  userPlatforms UserPlatform[]
+  postLogs      PostLog[]
+  
+  @@index([type])
+}
+
+model UserPlatform {
+  id               String    @id @default(cuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id])
+  platformId       String
+  platform         Platform  @relation(fields: [platformId], references: [id])
+  
+  // Platform credentials (encrypted)
+  accessToken      String?   @db.Text
+  refreshToken     String?   @db.Text
+  tokenExpiresAt   DateTime?
+  apiKey           String?   @db.Text
+  apiSecret        String?   @db.Text
+  
+  // Connection status
+  isConnected      Boolean   @default(false)
+  lastConnectedAt  DateTime?
+  
+  // Posting preferences
+  autoPost         Boolean   @default(true)
+  postTemplate     String?   @db.Text
+  includeImage     Boolean   @default(true)
+  includeHashtags  Boolean   @default(true)
+  
+  // Timestamps
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  
+  @@unique([userId, platformId])
+  @@index([userId])
+  @@index([platformId])
+}
+
+model PostLog {
+  id          String      @id @default(cuid())
+  jobId       String
+  job         Job         @relation(fields: [jobId], references: [id])
+  platformId  String
+  platform    Platform    @relation(fields: [platformId], references: [id])
+  userId      String
+  user        User        @relation(fields: [userId], references: [id])
+  
+  // Post details
+  postUrl     String?     // URL of the social media post
+  postId      String?     // Platform-specific post ID
+  content     String      @db.Text // The actual post content
+  mediaUrls   String[]    // Array of media URLs posted
+  
+  // Status tracking
+  status      String      @default("PENDING") // PENDING, POSTED, FAILED
+  error       String?     @db.Text // Error message if failed
+  retryCount  Int         @default(0)
+  
+  // Analytics
+  impressions Int?        @default(0)
+  engagements Int?        @default(0)
+  clicks      Int?        @default(0)
+  
+  // Timestamps
+  scheduledAt DateTime?   // When it was scheduled to post
+  postedAt    DateTime?   // When it was actually posted
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  
+  @@index([jobId])
+  @@index([platformId])
+  @@index([userId])
+  @@index([status])
+  @@index([postedAt])
+}
+
+// ========== BRANDING ==========
+model Branding {
+  id          String    @id @default(cuid())
+  userId      String    @unique
+  user        User      @relation(fields: [userId], references: [id])
+  
+  // Logo & Images
+  logoUrl     String?   // URL to uploaded logo
+  watermarkUrl String?  // URL to watermark image
+  faviconUrl  String?   // URL to favicon
+  
+  // Colors
+  primaryColor   String  @default("#3B82F6") // Blue-500
+  secondaryColor String  @default("#1E40AF") // Blue-700
+  accentColor    String  @default("#10B981") // Emerald-500
+  
+  // Typography
+  fontFamily     String  @default("Inter")
+  headingFont    String? 
+  bodyFont       String?
+  
+  // Watermark settings
+  watermarkPosition String @default("bottom-right") // top-left, top-right, bottom-left, bottom-right, center
+  watermarkOpacity  Float  @default(0.7) // 0.0 to 1.0
+  
+  // Image settings
+  imageStyle      String  @default("modern") // modern, corporate, creative, minimal
+  includeLogo     Boolean @default(true)
+  includeDomain   Boolean @default(true)
+  
+  // Timestamps
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ========== ANALYTICS ==========
+model JobClick {
+  id          String    @id @default(cuid())
+  jobId       String
+  job         Job       @relation(fields: [jobId], references: [id])
+  userId      String?   // User who clicked (if logged in)
+  user        User?     @relation(fields: [userId], references: [id])
+  
+  // Click metadata
+  referrer    String?   // Where click came from
+  platform    String?   // Which social platform
+  userAgent   String?
+  ipAddress   String?   @db.VarChar(45) // IPv4 or IPv6
+  country     String?
+  city        String?
+  
+  // Timestamps
+  clickedAt   DateTime  @default(now())
+  
+  @@index([jobId])
+  @@index([userId])
+  @@index([clickedAt])
+  @@index([platform])
+}
+
+model UserAnalytics {
+  id                  String    @id @default(cuid())
+  userId              String    @unique
+  user                User      @relation(fields: [userId], references: [id])
+  
+  // Summary statistics
+  totalJobsScraped    Int       @default(0)
+  totalJobsPublished  Int       @default(0)
+  totalPostsMade      Int       @default(0)
+  totalClicks         Int       @default(0)
+  
+  // Platform breakdown (stored as JSON for flexibility)
+  platformStats       Json?     // { twitter: { posts: 0, clicks: 0 }, ... }
+  
+  // Time-based tracking
+  dailyStats          Json?     // Last 30 days of stats
+  monthlyStats        Json?     // Last 12 months of stats
+  
+  // Performance metrics
+  avgClickRate        Float?    @default(0.0) // Clicks per post
+  bestPerformingJob   String?   // jobId of best performing job
+  
+  // Timestamps
+  lastUpdated         DateTime  @default(now())
+  
+  @@index([userId])
+}
+
+// ========== SYSTEM & AUDIT ==========
+model SystemLog {
+  id          String    @id @default(cuid())
+  level       String    // INFO, WARN, ERROR, DEBUG
+  message     String    @db.Text
+  context     Json?     // Additional context data
+  
+  // Source
+  service     String    // "scraper", "ai-processor", "social-poster"
+  userId      String?
+  user        User?     @relation(fields: [userId], references: [id])
+  
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  
+  @@index([level])
+  @@index([service])
+  @@index([createdAt])
+}
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  
+  key         String    @unique
+  name        String
+  description String?
+  
+  // Permissions (stored as JSON array)
+  permissions String[]  // ["read:jobs", "write:jobs", "admin"]
+  
+  // Expiry
+  expiresAt   DateTime?
+  lastUsedAt  DateTime?
+  
+  // Status
+  isActive    Boolean   @default(true)
+  
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@index([userId])
+  @@index([key])
+}
